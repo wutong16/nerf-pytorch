@@ -1,0 +1,15 @@
+expname = face8_half_nondc
+basedir = ./logs
+datadir = ./data/nerf_face/8_left
+dataset_type = llff
+
+factor = 2
+llffhold = 8
+
+N_rand = 1024
+N_samples = 64
+N_importance = 128 
+
+use_viewdirs = True
+raw_noise_std = 1e0
+no_ndc = True

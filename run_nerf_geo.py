@@ -39,7 +39,7 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
-
+    # import ipdb; ipdb.set_trace()
     if viewdirs is not None:
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
@@ -383,6 +383,7 @@ def render_rays(ray_batch,
 
 #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
+    import ipdb; ipdb.set_trace()
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     if N_importance > 0:
@@ -417,6 +418,65 @@ def render_rays(ray_batch,
 
     return ret
 
+def validate_mesh(bound_min, bound_max, resolution=368, scene=0, savedir='', threshold=25, scale_mats_np=None, gt_eval=False, **kwargs):
+    import trimesh
+    os.makedirs(savedir, exist_ok=True)
+    vertices, triangles = extract_geometry(bound_min, bound_max, resolution=resolution, threshold=threshold, **kwargs)
+    if scale_mats_np is not None:
+        vertices = vertices * scale_mats_np[0, 0] + scale_mats_np[:3, 3][None]
+    # import
+    mesh = trimesh.Trimesh(vertices, triangles)
+    mesh_path = os.path.join(savedir, "{:03d}_".format(scene)+'.ply')
+    mesh.export(mesh_path)
+    print("mesh saved at " + mesh_path)
+    if gt_eval:
+        mean_d2s, mean_s2d, over_all = dtu_eval.eval(mesh_path, scene=scene, eval_dir=savedir,
+                                                     dataset_dir='data/DTU', suffix='eval', use_o3d=False, runtime=False) # runtime means using down-sampled pcd
+        print(" [ d2s: {:.3f} | s2d: {:.3f} | mean: {:.3f} ]".format(mean_d2s, mean_s2d, over_all))
+        return over_all
+
+def extract_geometry(bound_min, bound_max, network_fn, network_query_fn, resolution=128, threshold=0.001, **kwargs):
+    bound_min = torch.tensor([-1., -1., -1.]).cuda() * 0.85
+    bound_max = torch.tensor([1, 1, 1]).cuda() * 0.85
+    def query_func(pts):
+        viewdirs = torch.zeros_like(pts).cuda()
+        pts = pts.unsqueeze(1)
+        # import ipdb; ipdb.set_trace()
+        raw = network_query_fn(pts, viewdirs, network_fn)
+        return raw[...,-1]
+
+    return extract_geometry_(bound_min,
+                            bound_max,
+                            resolution=resolution,
+                            threshold=threshold,
+                            query_func=query_func)
+
+def extract_geometry_(bound_min, bound_max, resolution, threshold, query_func, N = 64):
+    import mcubes
+    print('threshold: {}'.format(threshold))
+    u = extract_fields(bound_min, bound_max, resolution, query_func, N)
+    vertices, triangles = mcubes.marching_cubes(u, threshold)
+    b_max_np = bound_max.detach().cpu().numpy()
+    b_min_np = bound_min.detach().cpu().numpy()
+
+    vertices = vertices / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
+    return vertices, triangles
+
+def extract_fields(bound_min, bound_max, resolution, query_func, N = 64):
+    X = torch.linspace(bound_min[0], bound_max[0], resolution).split(N)
+    Y = torch.linspace(bound_min[1], bound_max[1], resolution).split(N)
+    Z = torch.linspace(bound_min[2], bound_max[2], resolution).split(N)
+
+    u = np.zeros([resolution, resolution, resolution], dtype=np.float32)
+    with torch.no_grad():
+        for xi, xs in enumerate(X):
+            for yi, ys in enumerate(Y):
+                for zi, zs in enumerate(Z):
+                    xx, yy, zz = torch.meshgrid(xs, ys, zs)
+                    pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1)
+                    val = query_func(pts).reshape(len(xs), len(ys), len(zs)).detach().cpu().numpy()
+                    u[xi * N: xi * N + len(xs), yi * N: yi * N + len(ys), zi * N: zi * N + len(zs)] = val
+    return u
 
 def config_parser():
 
@@ -530,6 +590,7 @@ def config_parser():
     parser.add_argument("--wmask",   type=bool, default=True)
     parser.add_argument("--reso_level",   type=int, default=1)
     parser.add_argument("--scene",   type=int, default=0)
+    parser.add_argument("--validate_mesh", action='store_true')
 
     return parser
 
@@ -609,7 +670,7 @@ def train():
     elif args.dataset_type == 'dtu':
         args.datadir += str(args.scene)
         args.expname += str(args.scene)
-        images, poses, render_poses, hwf, K, i_split, near, far = load_dtu_data(
+        images, poses, render_poses, hwf, K, i_split, near, far, scale_mats_np = load_dtu_data(
                                                                             basedir=args.datadir,
                                                                             normalize=True,
                                                                             reso_level=args.reso_level,
@@ -638,6 +699,7 @@ def train():
     # Create log dir and copy the config file
     basedir = args.basedir
     expname = args.expname
+
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
     f = os.path.join(basedir, expname, 'args.txt')
     with open(f, 'w') as file:
@@ -683,6 +745,15 @@ def train():
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
             return
+
+    if args.validate_mesh:
+        print('RENDER ONLY')
+        with torch.no_grad():
+            testsavedir = os.path.join(basedir, expname, 'meshes')
+            # import ipdb; ipdb.set_trace()
+            validate_mesh(near, far, **render_kwargs_test, savedir=testsavedir) # , scale_mats_np=scale_mats_np
+            return
+
 
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
