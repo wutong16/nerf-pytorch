@@ -777,10 +777,10 @@ def train():
         optimizer.zero_grad()
         # img_loss = img2mse(rgb, target_s)
         bg = 1. if args.white_bkgd else 0
-        fake_mask = (target_s.sum(-1, keepdim=True) == bg).float()
+        fake_mask = (target_s.sum(-1, keepdim=True) != bg).float()
         fore_loss = torch.sum(((rgb - target_s) ** 2)*fake_mask) / fake_mask.sum() / 3
         bg_loss = torch.sum(((rgb - target_s) ** 2)*(1-fake_mask)) / (1-fake_mask).sum() / 3
-        img_loss = fore_loss + bg_loss * 0.1
+        img_loss = fore_loss + bg_loss * 0.5
 
         trans = extras['raw'][...,-1]
         loss = img_loss
